@@ -6,6 +6,8 @@ The run the program, use the console command: <b>'python3 tsipdecode.py tsip7.bi
 The other program datumserial.py reads directly from the serial port. Currently is it set up for 19200 baud with HW hand handshaking. 
 The run this use <b>'python3 datumserial.py'.</b> 
 
+The 'datumserial.py' was created using [Perplexity AI ver 3.20](https://www.perplexity.ai/) ver 3.20 
+
 This software is GPL3.0 free to use as-is.
 
 Example serial capture:
