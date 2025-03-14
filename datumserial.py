@@ -1,7 +1,6 @@
 # This is cobbled together to parse Trimble (TSIP) serial data from GPS Datum 9390-55165 receiver.
 # Had to fudge the 0x41 to add 2048 to the GPS week because of the missing epoch rollover
-
-
+# This software was developed with assistance from Perplexity AI (https://www.perplexity.ai), accessed on March 13, 2025.
 
 import serial
 import struct
@@ -67,7 +66,8 @@ def parse_tsip_packet(packet):
         0x45: parse_firmware_info,
         0x46: parse_health,
         0x47: parse_signal_levels,
-        0x48: parse_packet_48,  
+        0x48: parse_packet_48, 
+        0x49: parse_almanac_health, 
         0x4A: parse_packet_4A,
         0x4B: parse_additional_status,
         0x54: parse_packet_54,
@@ -310,6 +310,49 @@ def parse_packet_48(packet_id, data):
 
     except Exception as e:
         print(f"Error parsing GPS System Message packet: {e}")
+
+
+def parse_almanac_health(packet_id, data):
+    """Parses TSIP Report Packet 0x49: Almanac Health Page Report."""
+    if len(data) < 32:
+        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Almanac Health Report")
+        return
+
+    try:
+        health_status = {}
+        healthy_count = 0
+        unhealthy_count = 0
+        
+        print(f"Report Packet: 0x{packet_id:02X}: Almanac Health Page Report")
+        print(" Satellite | Status")
+        print("-------------------")
+        
+        for sat_num in range(32):
+            status_byte = data[sat_num]
+            is_healthy = status_byte == 0
+            health_status[sat_num + 1] = "Healthy" if is_healthy else "Unhealthy"
+            
+            if is_healthy:
+                healthy_count += 1
+            else:
+                unhealthy_count += 1
+                
+            print(f" SV{sat_num + 1:3}     | {'✅ Healthy' if is_healthy else '❌ Unhealthy (0x' + format(status_byte, '02X') + ')'}")
+
+        print("\nSummary:")
+        print(f" Healthy Satellites: {healthy_count}")
+        print(f" Unhealthy Satellites: {unhealthy_count}")
+        
+        return {
+            "packet_id": packet_id,
+            "health_status": health_status,
+            "healthy_count": healthy_count,
+            "unhealthy_count": unhealthy_count
+        }
+        
+    except IndexError as e:
+        print(f"Error parsing Almanac Health Report: {e}")
+
 
 
 def parse_packet_4A(packet_id, data):
