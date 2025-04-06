@@ -1,58 +1,99 @@
-# This is cobbled together to parse Trimble (TSIP) serial data from GPS Datum 9390-55165 receiver.
-# Had to fudge the 0x41 to add 2048 to the GPS week because of the missing epoch rollover
-# This software was developed with assistance from Perplexity AI (https://www.perplexity.ai), accessed on March 13, 2025.
+# This softwae is used for Datum 9390 GPS reciever and developed by the assistance of Perplexity version pplx-70b-online"
+# - Many of the parse functions were written with the assistance of Perplexity AI version pplx-70b-online, including:
+#   - Packet parsing logic
+#   - Struct unpacking
+#   - Error handling
+#   - Comment Documentation assistance
+
+
+
 
 import serial
 import struct
 from datetime import datetime, timedelta
+import argparse
+
+# Color codes for console output
+WHITE = "\033[97m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+BLUE = "\033[94m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
 
 # Constants for TSIP framing
 DLE = 0x10  # Data Link Escape
 ETX = 0x03  # End of Text
 
-def read_tsip_packet(serial_port):
-    """Reads a single TSIP packet from the serial port."""
-    buffer = bytearray()
-    state = 0  # 0: waiting for DLE, 1: waiting for ID, 2: reading data
+# Global debug flag
+DEBUG = False
 
+def send_tsip_packet(serial_port, packet_id, data=b''):
+    """Sends a TSIP command packet with proper DLE stuffing."""
+    packet = bytearray([packet_id]) + bytearray(data)
+    framed_packet = bytearray([DLE])
+    # Add packet data with DLE stuffing
+    for byte in packet:
+        framed_packet.append(byte)
+        if byte == DLE:
+            framed_packet.append(DLE)  # Stuff an extra DLE
+    framed_packet.extend([DLE, ETX])
+    if DEBUG:
+        print(f"{WHITE}Debug: Sending packet, ID=0x{packet_id:02X}, data={data.hex()}, framed={framed_packet.hex()}{RESET}")
+    serial_port.write(framed_packet)
+
+def read_tsip_packet(serial_port, buffer_queue=None):
+    """Reads a single TSIP packet from the serial port, buffering excess data."""
+    if buffer_queue is None:
+        buffer_queue = bytearray()
+    packet_buffer = bytearray()
+    raw_buffer = bytearray()
+    state = 0
     while True:
-        byte = serial_port.read(1)
+        if buffer_queue:  # Process buffered data first
+            byte = bytes([buffer_queue.pop(0)])
+        else:
+            byte = serial_port.read(1)
         if not byte:
-            print("Timeout or no data received")
-            return None  # Timeout or no data
-
+            print(f"{YELLOW}Timeout or no data received{RESET}")
+            return None
         b = byte[0]
-
+        raw_buffer.append(b)
         if state == 0:  # Waiting for DLE
-            if b == 0x10:  # Start of packet
+            if b == DLE:
                 state = 1
         elif state == 1:  # Waiting for ID
-            if b == 0x10:  # Escaped DLE, stay in this state
+            if b == DLE:  # Escaped DLE
                 continue
-            buffer.append(b)  # Packet ID
+            packet_buffer.append(b)  # Packet ID
             state = 2
         elif state == 2:  # Reading data
-            if b == 0x10:  # Possible end of packet
-                next_byte = serial_port.read(1)
+            if b == DLE:
+                next_byte = serial_port.read(1) if not buffer_queue else bytes([buffer_queue.pop(0)])
                 if not next_byte:
-                    print("Unexpected end of packet")
+                    print(f"{RED}Unexpected end of packet{RESET}")
                     return None
                 next_byte = next_byte[0]
-                if next_byte == 0x03:  # End of packet
-                    return bytes(buffer)  # Return parsed packet
-                elif next_byte == 0x10:  # Escaped DLE
-                    buffer.append(0x10)
+                raw_buffer.append(next_byte)
+                if next_byte == ETX:
+                    excess = raw_buffer[len(raw_buffer) - raw_buffer[::-1].index(DLE) - 1:]
+                    if len(excess) > 2:
+                        buffer_queue.extend(excess[2:])
+                    if DEBUG:
+                        print(f"{WHITE}Debug: Packet read, length={len(packet_buffer)}, data={packet_buffer.hex()}, raw={raw_buffer.hex()}, buffered={buffer_queue.hex()}{RESET}")
+                    return bytes(packet_buffer)
+                elif next_byte == DLE:
+                    packet_buffer.append(DLE)
                 else:
-                    buffer.append(0x10)
-                    buffer.append(next_byte)
+                    packet_buffer.append(DLE)
+                    packet_buffer.append(next_byte)
             else:
-                buffer.append(b)
- 
+                packet_buffer.append(b)
 
 def parse_tsip_packet(packet):
     """Parses a TSIP packet based on its ID."""
     if len(packet) < 1:
-        print("Invalid packet: too short")
+        print(f"{RED}Invalid packet: too short{RESET}")
         return
 
     packet_id = packet[0]
@@ -60,20 +101,20 @@ def parse_tsip_packet(packet):
 
     parsers = {
         0x40: parse_packet_40,
-        0x41: parse_gps_time,
+        0x41: parse_packet_41,
         0x43: parse_packet_43,
-        0x44: parse_satellite_selection,
-        0x45: parse_firmware_info,
-        0x46: parse_health,
-        0x47: parse_signal_levels,
-        0x48: parse_packet_48, 
-        0x49: parse_almanac_health, 
+        0x44: parse_packet_44,
+        0x45: parse_packet_45,
+        0x46: parse_packet_46,
+        0x47: parse_packet_47,
+        0x48: parse_packet_48,
+        0x49: parse_packet_49,
         0x4A: parse_packet_4A,
-        0x4B: parse_additional_status,
+        0x4B: parse_packet_4B,
         0x54: parse_packet_54,
         0x55: parse_packet_55,
-        0x5B: parse_sat_health_status,
-        0x70: parse_POS_Filter,  
+        0x5B: parse_packet_5B,
+        0x70: parse_packet_70,
         0x82: parse_packet_82,
     }
 
@@ -81,115 +122,92 @@ def parse_tsip_packet(packet):
     if parser_function:
         parser_function(packet_id, data)
     else:
-        print(f"Report Packet: 0x{packet_id:02X}: Unknown packet, Data: {data.hex()}")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Unknown packet, Data: {data.hex()}{RESET}")
 
 def parse_packet_40(packet_id, data):
-    """Parses TSIP Report Packet 0x40: Almanac Data for Single Satellite."""
-    
-    # Check if the data length is sufficient
-    if len(data) < 39:  # Minimum required length based on Table 3-5
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Almanac Data")
-        return
-
+    """Parses Almanac Data Packet (Packet ID: 0x40)."""
     try:
-        # Unpack the almanac data according to Table 3-5
-        satellite, t_zc, week_number, eccentricity, t_oa, i_o, omega_dot, sqrt_a, omega_o, omega, mo = struct.unpack('>BfHfffffff', data[:39])
-        
-        # Print parsed information
-        print(f"Report Packet: 0x{packet_id:02X}: Almanac Data for Single Satellite")
-        print(f"  Satellite PRN: {satellite} (1-32)")
-        print(f"  T_zc (Z-count time): {t_zc:.2f} seconds")
-        print(f"  Week Number: {week_number} weeks")
-        print(f"  Eccentricity: {eccentricity:.6f} (dimensionless)")
-        print(f"  T_oa (Time of Almanac): {t_oa:.2f} seconds")
-        print(f"  i_o (Inclination Angle): {i_o:.6f} radians")
-        print(f"  OMEGA_dot (Rate of Right Ascension): {omega_dot:.6f} radians/sec")
-        print(f"  Square Root of Semi-Major Axis (sqrt(A)): {sqrt_a:.6f} meters^(1/2)")
-        print(f"  OMEGA_o (Longitude of Ascending Node): {omega_o:.6f} radians")
-        print(f"  Omega (Argument of Perigee): {omega:.6f} radians")
-        print(f"  Mo (Mean Anomaly): {mo:.6f} radians")
+        if len(data) < 35:  # Minimum length for one satellite's almanac data
+            print(f"{RED}{datetime.now()} - Error: Insufficient data for Packet ID: 0x{packet_id:X}{RESET}")
+            return
 
-        # Return parsed data as a dictionary
-        return {
-            "packet_id": packet_id,
-            "satellite_prn": satellite,
-            "t_zc": t_zc,
-            "week_number": week_number,
-            "eccentricity": eccentricity,
-            "t_oa": t_oa,
-            "i_o": i_o,
-            "omega_dot": omega_dot,
-            "sqrt_a": sqrt_a,
-            "omega_o": omega_o,
-            "omega": omega,
-            "mo": mo
-        }
+        print(f"{datetime.now()} - Report Packet: {BLUE}0x{packet_id:X}{RESET} - Almanac Data")
+        # Parse each satellite's almanac data
+        offset = 0
+        while offset + 35 <= len(data):  # Each satellite's almanac data is 35 bytes
+            prn = data[offset]  # Satellite PRN Number (1 byte)
+            gps_week = struct.unpack('>H', data[offset + 1:offset + 3])[0]  # GPS Week Number (2 bytes)
+            sv_health = data[offset + 3]  # SV Health (1 byte)
+            eccentricity = struct.unpack('>H', data[offset + 4:offset + 6])[0]  # Eccentricity (2 bytes)
+            ref_time = struct.unpack('>H', data[offset + 6:offset + 8])[0]  # Reference Time (2 bytes)
+            inclination = struct.unpack('>H', data[offset + 8:offset + 10])[0]  # Inclination Angle (2 bytes)
+            rate_of_ra = struct.unpack('>f', data[offset + 10:offset + 14])[0]  # Rate of Right Ascension (4 bytes)
+            semi_major_axis_root = struct.unpack('>f', data[offset + 14:offset + 18])[0]  # Semi-Major Axis Root (4 bytes)
+            omega = struct.unpack('>f', data[offset + 18:offset + 22])[0]  # Omega (Argument of Perigee) (4 bytes)
+            asc_node_longitude = struct.unpack('>f', data[offset + 22:offset + 26])[0]  # Longitude of Ascension Node (4 bytes)
+            mean_anomaly = struct.unpack('>f', data[offset + 26:offset + 30])[0]  # Mean Anomaly (4 bytes)
+            af0 = struct.unpack('>f', data[offset + 30:offset + 34])[0]  # Clock Parameter \(a_f0\) (4 bytes)
 
-    except struct.error as e:
-        print(f"Error parsing Almanac Data packet 0x40: {e}")
+            print(f" Satellite PRN={GREEN}{prn}{RESET}, GPS Week={GREEN}{gps_week}{RESET}, SV Health={GREEN}{sv_health}{RESET}")
+            print(f" Eccentricity={GREEN}{eccentricity}{RESET}, Reference Time={GREEN}{ref_time}{RESET}, Inclination={GREEN}{inclination}{RESET}")
+            print(f" Rate of Right Ascension={GREEN}{rate_of_ra:.6f}{RESET}, Semi-Major Axis Root={GREEN}{semi_major_axis_root:.6f}{RESET}")
+            print(f" Omega={GREEN}{omega:.6f}{RESET}, Longitude of Ascension Node={GREEN}{asc_node_longitude:.6f}{RESET}")
+            print(f" Mean Anomaly={GREEN}{mean_anomaly:.6f}{RESET}, Clock Parameter af0={GREEN}{af0:.6f}{RESET}")
+            offset += 35
+    except Exception as e:
+        print(f"{RED}Error parsing Almanac Data packet 0x{packet_id:X}: {e}, data={data.hex()}{RESET}")
 
-
-def parse_gps_time(packet_id, data):
-    """Parses GPS Time (Packet ID 0x41) and handles week rollovers."""
+def parse_packet_41(packet_id, data):
+    """Parses GPS Time (Packet ID 0x41)."""
     if len(data) < 10:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for GPS Time")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for GPS Time{RESET}")
         return
-    
     try:
-        # Unpack GPS time fields
         time_of_week, extended_gps_week, utc_offset = struct.unpack('>fHf', data[:10])
-        
-        # Handle GPS week rollovers
         gps_week = extended_gps_week
-        current_gps_week = 2357  # Approximate current GPS week as of March 2025
-        if gps_week < (current_gps_week - 1024):  # Adjust for rollover
-            gps_week += 2048 #Adjust for two missing epochs since GPS epoch (January 6, 1980) 
-        
-        # Display parsed information
-        print(f"Report Packet: 0x{packet_id:02X}: GPS Time")
-        print(f"  Time of Week: {time_of_week:.3f} seconds")
-        print(f"  Extended GPS Week: {gps_week}")
-        print(f"  UTC Offset: {utc_offset} seconds")  # Display UTC offset as an integer
-        
-        # Calculate current UTC time
-        gps_epoch = datetime(1980, 1, 6)  # GPS epoch start date
+        current_gps_week = 2357  # Approximate as of March 2025
+        if gps_week < (current_gps_week - 1024):
+            gps_week += 2048  # Adjust for rollovers
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: GPS Time{RESET}")
+        print(f"{WHITE} Time of Week:{RESET} {GREEN}{time_of_week:.3f} seconds{RESET}")
+        print(f"{WHITE} Extended GPS Week:{RESET} {GREEN}{gps_week}{RESET}")
+        print(f"{WHITE} UTC Offset:{RESET} {GREEN}{utc_offset} seconds{RESET}")
+
+        gps_epoch = datetime(1980, 1, 6)
         current_gps_time = gps_epoch + timedelta(weeks=gps_week, seconds=time_of_week)
         current_utc_time = current_gps_time - timedelta(seconds=int(utc_offset))
-        
-        # Display calculated UTC time
-        print(f"  Current UTC Time: {current_utc_time}")
+        print(f"{WHITE} Current UTC Time:{RESET} {GREEN}{current_utc_time}{RESET}")
     except struct.error as e:
-        print(f"Error parsing GPS Time packet: {e}")
-
+        print(f"{RED}Error parsing GPS Time packet: {e}{RESET}")
 
 def parse_packet_43(packet_id, data):
     """Parses TSIP Report Packet 0x43: Velocity Fix (XYZ ECEF)."""
     if len(data) < 12:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Velocity Fix")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Velocity Fix{RESET}")
         return
-
     try:
-        # Unpack the X, Y, Z velocities
         x_velocity, y_velocity, z_velocity = struct.unpack('>fff', data[:12])
-
-        # Print parsed information
-        print(f"Report Packet: 0x{packet_id:02X}: Velocity Fix (XYZ ECEF)")
-        print(f"  X Velocity: {x_velocity:.3f} m/s")
-        print(f"  Y Velocity: {y_velocity:.3f} m/s")
-        print(f"  Z Velocity: {z_velocity:.3f} m/s")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Velocity Fix (XYZ ECEF){RESET}")
+        print(f"{WHITE} X Velocity:{RESET} {GREEN}{x_velocity:.3f} m/s{RESET}")
+        print(f"{WHITE} Y Velocity:{RESET} {GREEN}{y_velocity:.3f} m/s{RESET}")
+        print(f"{WHITE} Z Velocity:{RESET} {GREEN}{z_velocity:.3f} m/s{RESET}")
     except struct.error as e:
-        print(f"Error parsing Velocity Fix packet: {e}")
+        print(f"{RED}Error parsing Velocity Fix packet: {e}{RESET}")
 
-
-def parse_satellite_selection(packet_id, data):
+def parse_packet_44(packet_id, data):
     """Parses Non-Overdetermined Satellite Selection Report (Packet ID 0x44)."""
-    
-    # Check data length
-    if len(data) < 21:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Satellite Selection Report")
+    expected_length = 21
+    if len(data) < expected_length:
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data, got {len(data)} bytes{RESET}")
         return
-    
-    # Define mode meanings
+    if len(data) > expected_length:
+        print(f"{YELLOW}Warning: Packet 0x44 length {len(data)} exceeds expected {expected_length} bytes, trimming excess{RESET}")
+        data = data[:expected_length]
+    if DEBUG:
+        print(f"{WHITE}Debug: Raw data length={len(data)}, data={data.hex()}{RESET}")
+        print(f"{WHITE}Debug: DOP bytes={data[5:21].hex()}{RESET}")
+
     MODE_MEANINGS = {
         1: "Auto, 1-satellite, 0D",
         3: "Auto, 3-satellite, 2D",
@@ -200,24 +218,30 @@ def parse_satellite_selection(packet_id, data):
     }
 
     try:
-        # Unpack data
         mode = data[0]
         sv1, sv2, sv3, sv4 = data[1:5]
         pdop, hdop, vdop, tdop = struct.unpack('>ffff', data[5:21])
+        dop_display = lambda x: f"{x:.2e}" if abs(x) > 1000 or abs(x) < 0.01 else f"{x:.2f}"
+        pdop_str = dop_display(pdop)
+        hdop_str = dop_display(hdop)
+        vdop_str = dop_display(vdop)
+        tdop_str = dop_display(tdop)
 
-        # Interpret mode
+        if any(abs(dop) > 1000 for dop in [pdop, hdop, vdop, tdop]):
+            print(f"{YELLOW}Warning: Invalid DOP value detected: PDOP={pdop}, HDOP={hdop}, VDOP={vdop}, TDOP={tdop}{RESET}")
+
+        active_sats = sum(1 for sv in [sv1, sv2, sv3, sv4] if sv != 0)
+        if mode == 4 and active_sats < 4:
+            print(f"{YELLOW}Warning: Mode indicates 4-satellite fix, but only {active_sats} satellites reported{RESET}")
+
         mode_description = MODE_MEANINGS.get(mode, "Unknown mode")
-
-        # Print parsed information
-        print(f"Report Packet: 0x{packet_id:02X}: Satellite Selection Report")
-        print(f"  Mode: {mode_description} ({mode:#02X})")
-        print(f"  Satellites: SV1={sv1}, SV2={sv2}, SV3={sv3}, SV4={sv4}")
-        print(f"  PDOP: {pdop:.2f}")
-        print(f"  HDOP: {hdop:.2f}")
-        print(f"  VDOP: {vdop:.2f}")
-        print(f"  TDOP: {tdop:.2f}")
-
-        # Return parsed data as dictionary
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Satellite Selection Report{RESET}")
+        print(f"{WHITE} Mode:{RESET} {GREEN}{mode_description} ({mode:#02X}){RESET}")
+        print(f"{WHITE} Satellites:{RESET} {GREEN}SV1={sv1}, SV2={sv2}, SV3={sv3}, SV4={sv4}{RESET}")
+        print(f"{WHITE} PDOP:{RESET} {GREEN}{pdop_str}{RESET}")
+        print(f"{WHITE} HDOP:{RESET} {GREEN}{hdop_str}{RESET}")
+        print(f"{WHITE} VDOP:{RESET} {GREEN}{vdop_str}{RESET}")
+        print(f"{WHITE} TDOP:{RESET} {GREEN}{tdop_str}{RESET}")
         return {
             "packet_id": packet_id,
             "mode": mode_description,
@@ -227,31 +251,28 @@ def parse_satellite_selection(packet_id, data):
             "vdop": vdop,
             "tdop": tdop
         }
-
     except struct.error as e:
-        print(f"Error parsing Satellite Selection packet: {e}")
+        print(f"{RED}Error parsing Satellite Selection packet: {e}, data={data.hex()}{RESET}")
 
-
-
-def parse_firmware_info(packet_id, data):
+def parse_packet_45(packet_id, data):
     """Parses Receiver Firmware Information (Packet ID 0x45)."""
     if len(data) < 10:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Firmware Information")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Firmware Information{RESET}")
         return
-    
+
     major_version = data[0]
     minor_version = data[1]
     month = data[2]
     day = data[3]
     year = struct.unpack('>H', data[4:6])[0]
     product_id = struct.unpack('>I', data[6:10])[0]
-    
-    print(f"Report Packet: 0x{packet_id:02X}: Receiver Firmware Information")
-    print(f"  Firmware Version: {major_version}.{minor_version}")
-    print(f"  Date: {year}-{month:02d}-{day:02d}")
-    print(f"  Product ID: {product_id}")
 
-def parse_health(packet_id, data):
+    print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Receiver Firmware Information{RESET}")
+    print(f"{WHITE} Firmware Version:{RESET} {GREEN}{major_version}.{minor_version}{RESET}")
+    print(f"{WHITE} Date:{RESET} {GREEN}{year}-{month:02d}-{day:02d}{RESET}")
+    print(f"{WHITE} Product ID:{RESET} {GREEN}{product_id}{RESET}")
+
+def parse_packet_46(packet_id, data):
     """Parses Health (Packet ID 0x46)."""
     try:
         status_code = data[0]
@@ -266,300 +287,309 @@ def parse_health(packet_id, data):
             0x0C: 'The chosen satellite is unusable'
         }
         desc = codes.get(status_code, "Unknown status code")
-        print(f"Report Packet: 0x{packet_id:02X}: Health Packet: Status Code={status_code:#02x}, Description={desc}")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Health Packet: Status Code={status_code:#02x}, Description={desc}{RESET}")
     except IndexError as e:
-        print(f"Error parsing Health packet: {e}")
+        print(f"{RED}Error parsing Health packet: {e}{RESET}")
 
-def parse_signal_levels(packet_id, data):
+def parse_packet_47(packet_id, data):
     """Parses Signal Levels (Packet ID 0x47)."""
+    if DEBUG:
+        print(f"{WHITE}Debug: Raw data length={len(data)}, data={data.hex()}{RESET}")
     try:
         count = data[0]
-        print(f"Report Packet: 0x{packet_id:02X}: Signal Levels Packet: Number of Satellites={count}")
+        expected_length = 1 + count * 5
+        if len(data) < expected_length:
+            print(f"{RED}Incomplete signal level data, expected {expected_length} bytes, got {len(data)}{RESET}")
+            return
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Signal Levels Packet: Number of Satellites={count}{RESET}")
         index = 1
         for i in range(count):
-            if index + 5 > len(data):
-                print("Incomplete signal level data")
-                break
             prn, signal_level = struct.unpack(">Bf", data[index:index + 5])
-            print(f"  SV PRN={prn}, Signal Level={signal_level:.2f}")
+            print(f"{WHITE} SV PRN={GREEN}{prn}{RESET}, Signal Level={GREEN}{signal_level:.2f}{RESET}")
             index += 5
     except struct.error as e:
-        print(f"Error parsing Signal Levels packet: {e}")
+        print(f"{RED}Error parsing Signal Levels packet: {e}{RESET}")
 
 def parse_packet_48(packet_id, data):
     """Parses TSIP Report Packet 0x48: GPS System Message Report."""
-    
-    # Check if the data length is sufficient
     if len(data) < 22:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for GPS System Message Report")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for GPS System Message Report{RESET}")
         return
-
     try:
-        # Extract the 22-byte ASCII message
-        message = data[:22].decode('ascii', errors='replace')  # Decode as ASCII, replacing invalid characters
-        
-        # Print the parsed information
-        print(f"Report Packet: 0x{packet_id:02X}: GPS System Message Report")
-        print(f"  Message: {message.strip()}")  # Strip any trailing whitespace or null characters
-        
-        # Return the parsed message as a dictionary
-        return {
-            "packet_id": packet_id,
-            "message": message.strip()
-        }
-
+        message = data[:22].decode('ascii', errors='replace')
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: GPS System Message Report{RESET}")
+        print(f"{WHITE} Message:{RESET} {GREEN}{message.strip()}{RESET}")
+        return {"packet_id": packet_id, "message": message.strip()}
     except Exception as e:
-        print(f"Error parsing GPS System Message packet: {e}")
+        print(f"{RED}Error parsing GPS System Message packet: {e}{RESET}")
 
-
-def parse_almanac_health(packet_id, data):
+def parse_packet_49(packet_id, data):
     """Parses TSIP Report Packet 0x49: Almanac Health Page Report."""
     if len(data) < 32:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Almanac Health Report")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Almanac Health Report{RESET}")
         return
-
     try:
         health_status = {}
         healthy_count = 0
         unhealthy_count = 0
-        
-        print(f"Report Packet: 0x{packet_id:02X}: Almanac Health Page Report")
-        print(" Satellite | Status")
-        print("-------------------")
-        
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Almanac Health Page Report{RESET}")
+        print(f"{WHITE} Satellite | Status{RESET}")
+        print(f"{WHITE}-------------------{RESET}")
         for sat_num in range(32):
             status_byte = data[sat_num]
             is_healthy = status_byte == 0
             health_status[sat_num + 1] = "Healthy" if is_healthy else "Unhealthy"
-            
             if is_healthy:
                 healthy_count += 1
             else:
                 unhealthy_count += 1
-                
-            print(f" SV{sat_num + 1:3}     | {'✅ Healthy' if is_healthy else '❌ Unhealthy (0x' + format(status_byte, '02X') + ')'}")
-
-        print("\nSummary:")
-        print(f" Healthy Satellites: {healthy_count}")
-        print(f" Unhealthy Satellites: {unhealthy_count}")
-        
+            health_str = f"{GREEN}✅ Healthy{RESET}" if is_healthy else f"{RED}❌ Unhealthy (0x{status_byte:02X}){RESET}"
+            print(f"{WHITE} SV{sat_num + 1:3} |{RESET} {health_str}")
+        print(f"\n{WHITE}Summary:{RESET}")
+        print(f"{WHITE} Healthy Satellites:{RESET} {GREEN}{healthy_count}{RESET}")
+        print(f"{WHITE} Unhealthy Satellites:{RESET} {RED}{unhealthy_count}{RESET}")
         return {
             "packet_id": packet_id,
             "health_status": health_status,
             "healthy_count": healthy_count,
             "unhealthy_count": unhealthy_count
         }
-        
     except IndexError as e:
-        print(f"Error parsing Almanac Health Report: {e}")
-
-
+        print(f"{RED}Error parsing Almanac Health Report: {e}{RESET}")
 
 def parse_packet_4A(packet_id, data):
     """Parses TSIP Report Packet 0x4A."""
     data_length = len(data)
-
     if data_length == 20 or data_length == 24:
-        # Single Precision LLA Position Fix Report
         try:
             latitude, longitude, altitude, clock_bias, time_of_fix = struct.unpack('>fffff', data[:20])
-            print(f"Report Packet: 0x{packet_id:02X}: Single Precision LLA Position Fix Report")
-            print(f"  Latitude: {latitude:.6f} radians ({latitude * (180 / 3.141592653589793):.6f} degrees)")
-            print(f"  Longitude: {longitude:.6f} radians ({longitude * (180 / 3.141592653589793):.6f} degrees)")
-            print(f"  Altitude: {altitude:.2f} meters")
-            print(f"  Clock Bias: {clock_bias:.2f} meters")
-            print(f"  Time of Fix: {time_of_fix:.3f} seconds")
+            print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Single Precision LLA Position Fix Report{RESET}")
+            print(f"{WHITE} Latitude:{RESET} {GREEN}{latitude:.6f} radians ({latitude * (180 / 3.141592653589793):.6f} degrees){RESET}")
+            print(f"{WHITE} Longitude:{RESET} {GREEN}{longitude:.6f} radians ({longitude * (180 / 3.141592653589793):.6f} degrees){RESET}")
+            print(f"{WHITE} Altitude:{RESET} {GREEN}{altitude:.2f} meters{RESET}")
+            print(f"{WHITE} Clock Bias:{RESET} {GREEN}{clock_bias:.2f} meters{RESET}")
+            print(f"{WHITE} Time of Fix:{RESET} {GREEN}{time_of_fix:.3f} seconds{RESET}")
         except struct.error as e:
-            print(f"Error parsing Single Precision LLA Position Fix Report: {e}")
+            print(f"{RED}Error parsing Single Precision LLA Position Fix Report: {e}{RESET}")
 
-
-def parse_additional_status(packet_id, data):
+def parse_packet_4B(packet_id, data):
     """Parses Machine/Code ID and Additional Status Report (Packet ID 0x4B)."""
     if len(data) < 3:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Additional Status Report")
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Additional Status Report{RESET}")
         return
-
-    # Extract fields
     machine_id = data[0]
     status_flags_1 = data[1]
     status_flags_2 = data[2]
-
-    # Interpret Status Flags 1
     battery_fault = (status_flags_1 >> 1) & 0x01
     acknowledged_status = (status_flags_1 >> 3) & 0x01
-
-    # Interpret Status Flags 2
     tsip_superpackets_fault = status_flags_2 & 0x01
     receiver_reset_fault = (status_flags_2 >> 1) & 0x01
     almanac_fault = (status_flags_2 >> 2) & 0x01
     adc_fault = (status_flags_2 >> 3) & 0x01
-
-    # Print parsed information
-    print(f"Report Packet: 0x{packet_id:02X}: Machine/Code ID and Additional Status Report")
-    print(f"  Machine ID: {machine_id:#02X}")
-    print(f"  Status Flags:")
-    print(f"    Battery-powered time clock fault: {'Yes' if battery_fault else 'No'}")
-    print(f"    Acknowledged status: {'Yes' if acknowledged_status else 'No'}")
-    print(f"    TSIP Superpackets fault: {'Yes' if tsip_superpackets_fault else 'No'}")
-    print(f"    Receiver reset fault: {'Yes' if receiver_reset_fault else 'No'}")
-    print(f"    Almanac fault: {'Yes' if almanac_fault else 'No'}")
-    print(f"    A-to-D converter fault: {'Yes' if adc_fault else 'No'}")
-
-def parse_packet_54(packet_id, data):
-    """Parses Report Packet 0x54: One Satellite Bias and Bias Rate Report."""
-    
-    if len(data) < 3:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for One Satellite Bias and Bias Rate Report")
-        return
-    
-    try:
-        bias = data[0]
-        bias_rate = data[1]
-        time_of_fix = data[2]
-
-        print(f"Report Packet: 0x{packet_id:02X}: One Satellite Bias and Bias Rate Report")
-        print(f"  Bias: {bias} (units unknown)")
-        print(f"  Bias Rate: {bias_rate} (units unknown)")
-        print(f"  Time of Fix: {time_of_fix} (possibly cyclic counter)")
-
-        return {
-            "packet_id": packet_id,
-            "bias": bias,
-            "bias_rate": bias_rate,
-            "time_of_fix": time_of_fix
+    print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Machine/Code ID and Additional Status Report{RESET}")
+    print(f"{WHITE} Machine ID:{RESET} {GREEN}{machine_id:#02X}{RESET}")
+    print(f"{WHITE} Status Flags:{RESET}")
+    battery_fault_str = f"{RED}Yes{RESET}" if battery_fault else f"{GREEN}No{RESET}"
+    print(f"{WHITE} Battery-powered time clock fault:{RESET} {battery_fault_str}")
+    acknowledged_status_str = f"{GREEN}Yes{RESET}" if acknowledged_status else f"{RED}No{RESET}"
+    print(f"{WHITE} Acknowledged status:{RESET} {acknowledged_status_str}")
+    tsip_superpackets_fault_str =  f"{RED}Yes{RESET}" if tsip_superpackets_fault else f"{GREEN}No{RESET}"
+    print(f"{WHITE} TSIP superpackets fault:{RESET} {tsip_superpackets_fault_str}")
+    receiver_reset_fault_str = f"{RED}Yes{RESET}" if receiver_reset_fault else f"{GREEN}No{RESET}"
+    print(f"{WHITE} Receiver reset fault:{RESET} {receiver_reset_fault_str}")
+    almanac_fault_str =  f"{RED}Yes{RESET}" if almanac_fault else f"{GREEN}No{RESET}"
+    print(f"{WHITE} Almanac fault:{RESET} {almanac_fault_str}")
+    adc_fault_str =  f"{RED}Yes{RESET}" if adc_fault else f"{GREEN}No{RESET}"
+    print(f"{WHITE} ADC fault:{RESET} {adc_fault_str}")
+    return {
+        "packet_id": packet_id,
+        "machine_id": machine_id,
+        "status_flags": {
+            "battery_fault": battery_fault,
+            "acknowledged_status": acknowledged_status,
+            "tsip_superpackets_fault": tsip_superpackets_fault,
+            "receiver_reset_fault": receiver_reset_fault,
+            "almanac_fault": almanac_fault,
+            "adc_fault": adc_fault
         }
+    }
 
-    except IndexError as e:
-        print(f"Error parsing One Satellite Bias and Bias Rate Report 0x54: {e}")
 
 def parse_packet_55(packet_id, data):
-    """Parses TSIP Report Packet 0x55: I/O Options Report."""
-    if len(data) < 4:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for I/O Options Report")
-        return
-
-    position_flags = data[0]
-    velocity_flags = data[1]
-    timing_flags = data[2]
-    auxiliary_flags = data[3]
-
-    print(f"Report Packet: 0x{packet_id:02X}: I/O Options Report")
-    
-    # Parse Position Flags
-    print("Position Flags:")
-    print(f"  XYZ ECEF Position Report: {'ON' if position_flags & 0x01 else 'OFF'}")
-    print(f"  LLA Position Report: {'ON' if position_flags & 0x02 else 'OFF'}")
-    print(f"  LLA Altitude Output: {'WGS-84 MSL' if position_flags & 0x04 else 'WGS-84 HAE'}")
-    print(f"  Altitude Input: {'WGS-84 MSL' if position_flags & 0x08 else 'WGS-84 HAE'}")
-    print(f"  Position Data Precision: {'Double' if position_flags & 0x10 else 'Single'}")
-    print(f"  Super Packet Output: {'ON' if position_flags & 0x20 else 'OFF'}")
-
-    # Parse Velocity Flags
-    print("Velocity Flags:")
-    print(f"  XYZ ECEF Velocity Report: {'ON' if velocity_flags & 0x01 else 'OFF'}")
-    print(f"  ENU Velocity Report: {'ON' if velocity_flags & 0x02 else 'OFF'}")
-
-    # Parse Timing Flags
-    print("Timing Flags:")
-    print(f"  Time Type: {'UTC' if timing_flags & 0x01 else 'GPS Time'}")
-    print(f"  Fix Computation Time: {'At Integer Second' if timing_flags & 0x02 else 'ASAP'}")
-    print(f"  Fix Time Output: {'On Request' if timing_flags & 0x04 else 'When Computed'}")
-    print(f"  Simultaneous Measurements: {'ON' if timing_flags & 0x08 else 'OFF'}")
-    print(f"  Minimum Projection: {'ON' if timing_flags & 0x10 else 'OFF'}")
-
-    # Parse Auxiliary Flags
-    print("Auxiliary Flags:")
-    print(f"  Measurement Output: {'ON' if auxiliary_flags & 0x01 else 'OFF'}")
-    print(f"  Codephase Measurement Data Source: {'ON' if auxiliary_flags & 0x02 else 'OFF'}")
-    print(f"  Additional Fix Status Report: {'ON' if auxiliary_flags & 0x04 else 'OFF'}")
-    print(f"  Signal Level Output Units: {'dBHz' if auxiliary_flags & 0x08 else 'AMUs'}")
-
-
-def parse_sat_health_status(packet_id, data):
-    """Report Packet 0x5B Satellite Ephemeris Status Report"""
-    if len(data) < 16:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Satellite Ephemeris Status Report")
-        return
-
-    SV_PRN = data[0]  # Pseudorandom number of satellite
-    Collection_time = struct.unpack('>f', data[1:5])[0]  # GPS time when Ephemeris data is collected
-    Health = data[5]  # The 6-bit ephemeris health
-    IODE = data[6]  # Issue of Data Ephemeris
-    tSec = struct.unpack('>f', data[7:11])[0]  # Time of Ephemeris (seconds)
-    Fit_Interval = data[11]  # Fit Interval Flag
-    URA = struct.unpack('>f', data[12:16])[0]  # User Range Accuracy (meters)
-
-    print(f"Report Packet: 0x{packet_id:02X}: Satellite Ephemeris Status Report")
-    print(f"  SV PRN: {SV_PRN}")
-    print(f"  Collection Time: {Collection_time:.3f} seconds")
-    print(f"  Health: 0x{Health:02X}")
-    print(f"  IODE: 0x{IODE:02X}")
-    print(f"  Time of Ephemeris: {tSec:.3f} seconds")
-    print(f"  Fit Interval Flag: 0x{Fit_Interval:02X}")
-    print(f"  URA: {URA:.2f} meters")
-
-def parse_POS_Filter(packet_id, data):
-    """Parses Position/Velocity Filter Operation Report (Packet ID 0x70)."""
-    if len(data) < 4:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for Position/Velocity Filter Operation Report")
+    """
+    Parses Throttle Percentage (Packet ID 0x55).
+    Assistance from Perplexity AI (pplx-70b-online): data interpretation, documentation.
+    Note: Corrected documentation error, this is Throttle Percentage, not Altitude Hold Enable.
+    """
+    if len(data) < 1:
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Throttle Percentage{RESET}")
         return
 
     try:
-        dynamic_filter = data[0]
-        static_filter = data[1]
-        altitude_filter = data[2]
-        reserved = data[3]
-
-        print(f"Report Packet: 0x{packet_id:02X}: Position/Velocity Filter Operation Report")
-        print(f"  Dynamic Filter Switch: 0x{dynamic_filter:02X}")
-        print(f"  Static Filter Switch: 0x{static_filter:02X}")
-        print(f"  Altitude Filter Switch: 0x{altitude_filter:02X}")
-        print(f"  Reserved: 0x{reserved:02X}")
-
-        return {
-            "packet_id": packet_id,
-            "dynamic_filter": dynamic_filter,
-            "static_filter": static_filter,
-            "altitude_filter": altitude_filter,
-            "reserved": reserved
-        }
+        throttle = data[0]
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Throttle Percentage{RESET}")
+        print(f"{WHITE} Throttle Percentage:{RESET} {GREEN}{throttle}%{RESET}")
 
     except IndexError as e:
-        print(f"Error parsing Position/Velocity Filter Operation Report: {e}")
+        print(f"{RED}Error parsing Throttle Percentage packet: {e}{RESET}")
 
 
-def parse_packet_82(packet_id, data):
-    """Parses TSIP Report Packet 0x82: SBAS Correction Status."""
+def parse_packet_5B(packet_id, data):
+    """Parses Satellite Ephemeris Status Report (Packet ID: 0x5B)."""
+    try:
+        if len(data) < 16:
+            print(f"{RED}Insufficient data for Satellite Ephemeris Status Report (Packet ID: 0x{packet_id:X}){RESET}")
+            return
+
+        sv_prn = data[0]
+        collection_time = struct.unpack('>f', data[1:5])[0]
+        health = data[5]
+        iode = data[6]
+        toe = struct.unpack('>f', data[7:11])[0]
+        fit_interval_flag = data[11]
+        ura = struct.unpack('>f', data[12:16])[0]
+
+        print(f"Satellite Ephemeris Status Report (Packet ID: {BLUE}0x{packet_id:X}{RESET}):")
+        print(f" SV PRN #: {GREEN}{sv_prn}{RESET}")
+        print(f" Collection Time: {GREEN}{collection_time:.2f}{RESET} seconds")
+        print(f" Health: {GREEN}{health}{RESET}")
+        print(f" IODE: {GREEN}{iode}{RESET}")
+        print(f" toe: {GREEN}{toe:.2f}{RESET} seconds")
+        print(f" Fit Interval Flag: {GREEN}{fit_interval_flag}{RESET}")
+        print(f" URA: {GREEN}{ura:.2f}{RESET} meters")
+    except Exception as e:
+        print(f"{RED}Error parsing Packet ID: 0x{packet_id:X} - {e}{RESET}")
+
+def parse_packet_70(packet_id, data):
+        """Parses Position Filter Configuration (Packet ID 0x70)."""
+        try:
+            if len(data) < 8:
+
+                print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Position Filter Configuration{RESET}")
+                return
+
+            config = struct.unpack('>BBHII', data[:8])
+
+            print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Position Filter Configuration{RESET}")
+            print(f"{WHITE} Configuration:{RESET} {GREEN}{config}{RESET}")
+        except Exception as e:
+
+            print(f"{RED}Error parsing Position Filter Configuration packet: {e}{RESET}")
+def parse_packet_54(packet_id, data):
+    """Parses Altitude Hold Enable (Packet ID 0x54)."""
+
     if len(data) < 1:
-        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for SBAS Correction Status")
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Altitude Hold Enable{RESET}")
         return
 
-    sbas_status_bits = data[0]
-    print(f"Report Packet: 0x{packet_id:02X}: SBAS Correction Status")
-    print(f"  SBAS Status Bits: {sbas_status_bits:#08b}")
+    try:
+
+        altitude_hold = data[0]
+
+        status = "Enabled" if altitude_hold else "Disabled"
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Altitude Hold Enable{RESET}")
+
+        print(f"{WHITE} Altitude Hold: {GREEN}{status}{RESET}")
+    except IndexError as e:
+
+        print(f"{RED}Error parsing Altitude Hold Enable packet: {e}{RESET}")
+def parse_packet_55(packet_id, data):
+
+    """Parses Throttle Percentage (Packet ID 0x55)."""
+
+    if len(data) < 1:
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Throttle Percentage{RESET}")
+        return
+
+    try:
+
+        throttle = data[0]
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Throttle Percentage{RESET}")
+
+        print(f"{WHITE} Throttle Percentage:{RESET} {GREEN}{throttle}%{RESET}")
+
+    except IndexError as e:
+
+        print(f"{RED}Error parsing Throttle Percentage packet: {e}{RESET}")
+
+def parse_packet_70(packet_id, data):
+
+    """Parses Navigation Filter Configuration (Packet ID 0x70)."""
+
+    if len(data) < 4:
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Navigation Filter Configuration{RESET}")
+        return
+
+    try:
+
+        nav1, nav2 = struct.unpack(">HH", data[:4])
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Navigation Filter Configuration{RESET}")
+
+        print(f"{WHITE} Nav 1:{RESET} {GREEN}{nav1}{RESET}")
+
+        print(f"{WHITE} Nav 2:{RESET} {GREEN}{nav2}{RESET}")
+
+    except struct.error as e:
+
+        print(f"{RED}Error parsing Navigation Filter Configuration packet: {e}{RESET}")
+
+def parse_packet_82(packet_id, data):
+
+    """Parses Output Rate Control (Packet ID 0x82)."""
+
+    if len(data) < 2:
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Output Rate Control{RESET}")
+        return
+
+    try:
+
+        rate_control1, rate_control2 = struct.unpack(">BB", data[:2])
+
+        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Output Rate Control{RESET}")
+
+        print(f"{WHITE} Rate Control 1:{RESET} {GREEN}{rate_control1}{RESET}")
+
+        print(f"{WHITE} Rate Control 2:{RESET} {GREEN}{rate_control2}{RESET}")
+
+    except struct.error as e:
+
+        print(f"{RED}Error parsing Output Rate Control packet: {e}{RESET}")
 
 def main():
-    # Open the serial port (adjust settings as needed)
-    serial_port = serial.Serial(
-    port="/dev/ttyUSB0",         # Replace with your serial port
-    baudrate=19200,              # Set baud rate
-    parity=serial.PARITY_NONE,   # No parity
-    stopbits=serial.STOPBITS_ONE, # One stop bit
-    bytesize=serial.EIGHTBITS,   # 8 data bits
-    timeout=10.0,                # Timeout in seconds
-    rtscts=True                  # Enable RTS/CTS hardware handshaking
-    )
-    print("Listening for TSIP packets...")
-    
+    """Main function to read and parse TSIP packets from serial port."""
+    parser = argparse.ArgumentParser(description="Read and parse TSIP packets from a serial port.")
+    parser.add_argument("port", help="Serial port to connect to")
+    parser.add_argument("-b", "--baudrate", type=int, default=9600, help="Baud rate for serial communication (default: 9600)")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug output")
+    args = parser.parse_args()
+
+    global DEBUG
+    DEBUG = args.debug
+
     try:
-        while True:
-            packet = read_tsip_packet(serial_port)
-            if packet is not None:
-                parse_tsip_packet(packet)
+        with serial.Serial(args.port, args.baudrate, timeout=5) as ser:
+            print(f"{WHITE}Connected to serial port {args.port} at {args.baudrate} baud{RESET}")
+
+            buffer_queue = bytearray()
+
+            while True:
+                packet = read_tsip_packet(ser, buffer_queue)
+
+                if packet:
+                    parse_tsip_packet(packet)
+
+    except serial.SerialException as e:
+        print(f"{RED}Error: Could not open serial port: {e}{RESET}")
+
     except KeyboardInterrupt:
-        print("Exiting...")
-    finally:
-        serial_port.close()
+        print(f"{WHITE}Exiting program{RESET}")
 
 if __name__ == "__main__":
     main()
