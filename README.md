@@ -6,7 +6,7 @@
 This program is a Python3 non-standard TSIP parser for serial RS-232 binaries captured from old (1990's) Datum9390-55058 Trimble GPS receiver.
 Created this program because receiver does not fully work with Trimble TSIP Rev C and to practice writing binary parsing.
 
-The run the program, use the console command: <b>'python3 tsipdecode.py tsip7.bin'</b>.
+To run the program, use the console command: <b>'python3 tsipdecode.py tsip7.bin'</b>.
 The other program datumserial.py reads directly from the serial port. Currently is it set up for 19200 baud with HW hand handshaking. 
 The run this use <b>'python3 datumserial.py'.</b> 
 
