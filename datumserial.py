@@ -10,7 +10,7 @@ import struct
 from datetime import datetime, timedelta
 import argparse
 import sys
-
+import math
 # Color codes for console output
 WHITE = "\033[97m"
 GREEN = "\033[92m"
@@ -135,7 +135,6 @@ def parse_packet_40(packet_id, data):
         print(f"{RED}Error parsing Almanac Data packet 0x{packet_id:X}: {e}, data={data.hex()}{RESET}")
 
 def parse_packet_41(packet_id, data):
-    """Parses GPS Time (Packet ID 0x41)."""
     if len(data) < 10:
         print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for GPS Time{RESET}")
         return
@@ -146,16 +145,66 @@ def parse_packet_41(packet_id, data):
         if gps_week < (current_gps_week - 1024):
             gps_week += 2048  # Adjust for rollovers
         print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: GPS Time{RESET}")
-        print(f"{WHITE} Time of Week:{RESET} {GREEN}{time_of_week:.3f} seconds{RESET}")
+        if time_of_week < 0 or time_of_week > 604800:
+            print(f"{YELLOW}Warning: Invalid Time of Week: {time_of_week:.3f} seconds (expected 0 to 604800){RESET}")
+        else:
+            print(f"{WHITE} Time of Week:{RESET} {GREEN}{time_of_week:.3f} seconds{RESET}")
         print(f"{WHITE} Extended GPS Week:{RESET} {GREEN}{gps_week}{RESET}")
         print(f"{WHITE} UTC Offset:{RESET} {GREEN}{utc_offset} seconds{RESET}")
-        gps_epoch = datetime(1980, 1, 6)
-        current_gps_time = gps_epoch + timedelta(weeks=gps_week, seconds=time_of_week)
-        current_utc_time = current_gps_time - timedelta(seconds=int(utc_offset))
-        print(f"{WHITE} Current UTC Time:{RESET} {GREEN}{current_utc_time}{RESET}")
+        if time_of_week >= 0 and time_of_week <= 604800:
+            gps_epoch = datetime(1980, 1, 6)
+            current_gps_time = gps_epoch + timedelta(weeks=gps_week, seconds=time_of_week)
+            current_utc_time = current_gps_time - timedelta(seconds=int(utc_offset))
+            print(f"{WHITE} Current UTC Time:{RESET} {GREEN}{current_utc_time}{RESET}")
     except struct.error as e:
         print(f"{RED}Error parsing GPS Time packet: {e}{RESET}")
 
+def parse_packet_42(packet_id, data):
+    """Parse Trimble TSIP Packet 0x42 (Single-Precision XYZ ECEF Position Fix)"""
+    EXPECTED_LENGTH = 16
+    MIN_LENGTH = 12
+
+    if len(data) < MIN_LENGTH:
+        print(f"{WHITE}Packet 0x{packet_id:02X}: {RED}ERROR{RESET} - "
+              f"Need {MIN_LENGTH} bytes, got {len(data)}{RESET}")
+        return None
+
+    try:
+        x, y, z = struct.unpack('>fff', data[:12])
+        time_of_fix = struct.unpack('>f', data[12:16])[0] if len(data) >= EXPECTED_LENGTH else float('nan')
+    except struct.error as e:
+        print(f"{WHITE}Packet 0x{packet_id:02X}: {RED}DECODE ERROR{RESET} - {str(e)}")
+        return None
+
+    # Debug: Print raw data
+    if DEBUG:
+        print(f"{WHITE}Debug: Raw data={data.hex()}{RESET}")
+
+    # Validate GPS time
+    if not math.isnan(time_of_fix):
+        if time_of_fix < 0 or time_of_fix > 604800:
+            print(f"{YELLOW}Warning: Invalid GPS Time: {time_of_fix:.3f} seconds (expected 0 to 604800){RESET}")
+            time_value = None
+        else:
+            print(f"{WHITE} GPS Time: {GREEN}{time_of_fix:.3f} seconds{RESET}")
+            time_value = time_of_fix
+    else:
+        print(f"{WHITE} GPS Time: {RED}Not Available{RESET}")
+        time_value = None
+
+    # Format console output
+    print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}:")
+    print(f"{WHITE} X ECEF: {GREEN}{x:12.3f} meters{RESET}")
+    print(f"{WHITE} Y ECEF: {GREEN}{y:12.3f} meters{RESET}")
+    print(f"{WHITE} Z ECEF: {GREEN}{z:12.3f} meters{RESET}")
+
+    return {
+        'packet_id': packet_id,
+        'x_ecef': x,
+        'y_ecef': y,
+        'z_ecef': z,
+        'gps_time': time_value
+    }
 def parse_packet_43(packet_id, data):
     """Parses Velocity Fix (XYZ ECEF) (Packet ID 0x43)."""
     if len(data) < 12:
@@ -220,16 +269,25 @@ def parse_packet_45(packet_id, data):
     if len(data) < 10:
         print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for Firmware Information{RESET}")
         return
-    major_version = data[0]
-    minor_version = data[1]
-    month = data[2]
-    day = data[3]
-    year = struct.unpack('>H', data[4:6])[0]
-    product_id = struct.unpack('>I', data[6:10])[0]
+
+    nav_major = data[0]
+    nav_minor = data[1]
+    nav_month = data[2]
+    nav_day = data[3]
+    nav_year = data[4] + 1900  # Year is stored as year - 1900
+    sig_major = data[5]
+    sig_minor = data[6]
+    sig_month = data[7]
+    sig_day = data[8]
+    sig_year = data[9] + 1900  # Year is stored as year - 1900
+
+
     print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Receiver Firmware Information{RESET}")
-    print(f"{WHITE} Firmware Version:{RESET} {GREEN}{major_version}.{minor_version}{RESET}")
-    print(f"{WHITE} Date:{RESET} {GREEN}{year}-{month:02d}-{day:02d}{RESET}")
-    print(f"{WHITE} Product ID:{RESET} {GREEN}{product_id}{RESET}")
+    print(f"{WHITE} NAV Proc:{RESET} {GREEN}{nav_major}.{nav_minor}{RESET}")
+    print(f"{WHITE} NAV Proc Date:{RESET} {GREEN}{nav_month}-{nav_day}-{nav_year}{RESET}")
+    print(f"{WHITE} SIG Proc:{RESET} {GREEN}{sig_major}.{sig_minor}{RESET}")
+    print(f"{WHITE} SIG Proc Date:{RESET} {GREEN}{sig_month}-{sig_day}-{sig_year}{RESET}")
+
 
 def parse_packet_46(packet_id, data):
     """Parses Health (Packet ID 0x46)."""
@@ -310,20 +368,21 @@ def parse_packet_49(packet_id, data):
         print(f"{RED}Error parsing Almanac Health Report: {e}{RESET}")
 
 def parse_packet_4A(packet_id, data):
-    """Parses Single Precision LLA Position Fix Report (Packet ID 0x4A)."""
     data_length = len(data)
     if data_length == 20 or data_length == 24:
         try:
             latitude, longitude, altitude, clock_bias, time_of_fix = struct.unpack('>fffff', data[:20])
             print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Single Precision LLA Position Fix Report{RESET}")
-            print(f"{WHITE} Latitude:{RESET} {GREEN}{latitude:.6f} radians ({latitude * (180 / 3.141592653589793):.6f} degrees){RESET}")
-            print(f"{WHITE} Longitude:{RESET} {GREEN}{longitude:.6f} radians ({longitude * (180 / 3.141592653589793):.6f} degrees){RESET}")
+            print(f"{WHITE} Latitude:{RESET} {GREEN}{latitude:.6f} radians ({latitude * (180 / 3.141592653589793):.10f} degrees){RESET}")
+            print(f"{WHITE} Longitude:{RESET} {GREEN}{longitude:.6f} radians ({longitude * (180 / 3.141592653589793):.10f} degrees){RESET}")
             print(f"{WHITE} Altitude:{RESET} {GREEN}{altitude:.2f} meters{RESET}")
             print(f"{WHITE} Clock Bias:{RESET} {GREEN}{clock_bias:.2f} meters{RESET}")
-            print(f"{WHITE} Time of Fix:{RESET} {GREEN}{time_of_fix:.3f} seconds{RESET}")
+            if time_of_fix < 0 or time_of_fix > 604800:
+                print(f"{YELLOW}Warning: Invalid Time of Fix: {time_of_fix:.3f} seconds (expected 0 to 604800){RESET}")
+            else:
+                print(f"{WHITE} Time of Fix:{RESET} {GREEN}{time_of_fix:.3f} seconds{RESET}")
         except struct.error as e:
             print(f"{RED}Error parsing Single Precision LLA Position Fix Report: {e}{RESET}")
-
 def parse_packet_4B(packet_id, data):
     """Parses Machine/Code ID and Additional Status Report (Packet ID 0x4B)."""
     if len(data) < 3:
@@ -441,6 +500,7 @@ def parse_tsip_packet(packet):
     parsers = {
         0x40: parse_packet_40,
         0x41: parse_packet_41,
+        0x42: parse_packet_42,
         0x43: parse_packet_43,
         0x44: parse_packet_44,
         0x45: parse_packet_45,
