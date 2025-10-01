@@ -136,26 +136,36 @@ def parse_packet_40(packet_id, data):
 
 def parse_packet_41(packet_id, data):
     if len(data) < 10:
-        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: Insufficient data for GPS Time{RESET}")
+        print(f"Report Packet: 0x{packet_id:02X}: Insufficient data for GPS Time")
         return
+
     try:
         time_of_week, extended_gps_week, utc_offset = struct.unpack('>fHf', data[:10])
         gps_week = extended_gps_week
         current_gps_week = 2357  # Approximate as of March 2025
         if gps_week < (current_gps_week - 1024):
             gps_week += 2048  # Adjust for rollovers
-        print(f"{WHITE}Report Packet: {BLUE}0x{packet_id:02X}{RESET}: GPS Time{RESET}")
+        
+        print(f"Report Packet: {GREEN}0x{packet_id:02X}{RESET}: GPS Time")
+        print(f"  Time of Week: {GREEN}{time_of_week:.3f}{RESET} seconds")
+        print(f"  Extended GPS Week:{GREEN}{gps_week}{RESET}")
+        print(f"  UTC Offset: {GREEN}{utc_offset}{RESET} seconds")
+        
         if time_of_week < 0 or time_of_week > 604800:
-            print(f"{YELLOW}Warning: Invalid Time of Week: {time_of_week:.3f} seconds (expected 0 to 604800){RESET}")
+            print(f"Warning: Invalid Time of Week value: {time_of_week}")
+            return
+        
+        gps_epoch = datetime(1980, 1, 6)
+        current_gps_time = gps_epoch + timedelta(weeks=gps_week, seconds=time_of_week)
+
+        # Sanity check UTC offset, typically small (e.g., < 100 seconds)
+        if not (0 <= utc_offset < 1000):
+            print(f"Warning: UTC offset out of range {RED}({utc_offset}){RESET}, skipping UTC calculation.")
+            print(f"  Current GPS Time (no UTC offset applied): {GREEN}{current_gps_time}{RESET}")
         else:
-            print(f"{WHITE} Time of Week:{RESET} {GREEN}{time_of_week:.3f} seconds{RESET}")
-        print(f"{WHITE} Extended GPS Week:{RESET} {GREEN}{gps_week}{RESET}")
-        print(f"{WHITE} UTC Offset:{RESET} {GREEN}{utc_offset} seconds{RESET}")
-        if time_of_week >= 0 and time_of_week <= 604800:
-            gps_epoch = datetime(1980, 1, 6)
-            current_gps_time = gps_epoch + timedelta(weeks=gps_week, seconds=time_of_week)
             current_utc_time = current_gps_time - timedelta(seconds=int(utc_offset))
-            print(f"{WHITE} Current UTC Time:{RESET} {GREEN}{current_utc_time}{RESET}")
+            print(f"  Current UTC Time: {GREEN}{current_utc_time}{RESET}")
+
     except struct.error as e:
         print(f"{RED}Error parsing GPS Time packet: {e}{RESET}")
 
